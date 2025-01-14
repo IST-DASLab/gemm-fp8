@@ -1,0 +1,8 @@
+*.cmake
+Makefile
+CMakeCache.txt
+CMakeFiles/*
+*.so
+gemm_fp8.egg-info/
+__pycache__/
+*.pyc
