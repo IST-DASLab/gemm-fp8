@@ -2,13 +2,13 @@ import torch
 import gemm_fp8._CUDA
 
 
-__all__ = [ 
+__all__ = [
            "matmul"
            ]
 
-def matmul(x: torch.Tensor, 
-           y: torch.Tensor, 
-           alpha: float = 1.0, 
+def matmul(x: torch.Tensor,
+           y: torch.Tensor,
+           alpha: float = 1.0,
            fastAcc: bool = True) -> torch.Tensor:
     '''
     Matrix-Matrix Multiplication for FP8 data type in the form of (x @ y.t())*alpha.
@@ -19,8 +19,4 @@ def matmul(x: torch.Tensor,
         alpha: float, which is multiplied by the output (default=1.0)
         fastAcc: bool, (default=True)
     '''
-    if fastAcc:
-        return gemm_fp8._CUDA.fp8_matmul_fastAcc(x, y, alpha)
-    else:
-        return gemm_fp8._CUDA.fp8_matmul(x, y, alpha)
-    
+    return gemm_fp8._CUDA.fp8_matmul(x, y, alpha)
