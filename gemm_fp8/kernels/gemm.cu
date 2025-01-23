@@ -52,153 +52,110 @@
 #include "cutlass/util/reference/host/tensor_norm.h"
 #include "cutlass/util/reference/host/gett.hpp"
 
-//#include "helper.h"
-//#include "hopper_fp8_commandline.hpp"
-
 #include <gemm.h>
 
 using namespace cute;
 
 using         ElementA    = cutlass::float_e4m3_t;
 using         LayoutA     = cutlass::layout::RowMajor;
-constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;
+constexpr int AlignmentA  = 16 / sizeof(ElementA);
 
 using         ElementB    = cutlass::float_e4m3_t;
 using         LayoutB     = cutlass::layout::ColumnMajor;
-constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;
+constexpr int AlignmentB  = 16 / sizeof(ElementB);
 
-// FIXME: necessary?
 using         ElementC    = cutlass::bfloat16_t;
 using         LayoutC     = cutlass::layout::RowMajor;
-constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;
-
-// D matrix configuration
-using         ElementD    = ElementC;
-using         LayoutD     = LayoutC;
-constexpr int AlignmentD  = AlignmentC;
-
-// Auxiliary matrix configuration and other fusion types
-using         ElementAux   = ElementC;
-using         LayoutAux    = LayoutC;
-using         ElementAmax  = float;
-using         ElementBias  = float;
+constexpr int AlignmentC  = 16 / sizeof(ElementC);
 
 // Core kernel configurations
 using ElementAccumulator  = float;                                          // Element type for internal accumulation
 using ElementCompute      = float;                                          // Element type for epilogue computation
+using ElementComputeEpilogue = float;
 using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
 using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
-using TileShape           = Shape<_128,_128,_128>;                          // Threadblock-level tile size
-using ClusterShape        = Shape<_1,_2,_1>;                                // Shape of the threadblocks in a cluster
-using KernelSchedule      = cutlass::gemm::KernelTmaWarpSpecializedCooperative;
-using EpilogueSchedule    = cutlass::epilogue::TmaWarpSpecializedCooperative;
 using EpilogueTileType    = cutlass::epilogue::collective::EpilogueTileAuto;
-/* using FusionOperation     = cutlass::epilogue::fusion::ScaledLinCombPerRowBiasEltActAmaxAux<
-                                    LayoutAux,
-                                    cutlass::epilogue::thread::ReLU,
-                                    ElementD,
-                                    ElementCompute,
-                                    ElementAux,
-                                    ElementAmax,
-                                    ElementBias,
-                                    ElementC>; */
 
-/* using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-                                    ArchTag, OperatorClass,
-                                    TileShape, ClusterShape,
-                                    EpilogueTileType,
-                                    ElementAccumulator, ElementCompute,
-                                    ElementC, LayoutC, AlignmentC,
-                                    ElementD, LayoutD, AlignmentD,
-                                    EpilogueSchedule,
-                                    FusionOperation
-                                  >::CollectiveOp; */
+using StageCountType =
+      cutlass::gemm::collective::StageCountAuto; // Stage count maximized
+                                                 // based on the tile size
+using KernelSchedule = cutlass::gemm::collective::
+      KernelScheduleAuto; // Kernel to launch based on the default setting in
+                          // the Collective Builder
 
+using DefaultSchedule = cutlass::gemm::KernelTmaWarpSpecialized;
+using PongSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+using FastDefaultSchedule =
+    cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+using FastPongSchedule =
+    cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+
+template <bool PONG>
+using SlowAccum = cute::conditional_t<PONG, PongSchedule, DefaultSchedule>;
+template <bool PONG>
+using FastAccum =
+      cute::conditional_t<PONG, FastPongSchedule, FastDefaultSchedule>;
+template <bool PONG, bool FAST_ACCUM>
+using MainLoopSchedule =
+      cute::conditional_t<FAST_ACCUM, FastAccum<PONG>, SlowAccum<PONG>>;
+
+using Scale_ =
+      cutlass::epilogue::fusion::Sm90ScalarBroadcast<ElementComputeEpilogue>;
+
+using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
+
+using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+    cutlass::multiplies,
+    ElementC,
+    ElementComputeEpilogue,
+    cutlass::FloatRoundStyle::round_to_nearest>;
+
+using EpilogueEVT =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, Scale_, Accum>;
+template <typename TileShape, typename ClusterShape>
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-                                    ArchTag, OperatorClass,
-                                    TileShape, ClusterShape,
+                                    ArchTag,
+                                    OperatorClass,
+                                    TileShape,
+                                    ClusterShape,
                                     EpilogueTileType,
-                                    ElementAccumulator, ElementCompute,
+                                    ElementAccumulator,
+                                    ElementCompute,
                                     ElementC, LayoutC, AlignmentC,
-                                    ElementD, LayoutD, AlignmentD,
-                                    cutlass::epilogue::collective::EpilogueScheduleAuto
-                                  >::CollectiveOp;
+                                    ElementC, LayoutC, AlignmentC,
+                                    cutlass::epilogue::TmaWarpSpecialized,
+                                    EpilogueEVT>::CollectiveOp;
 
+template <typename TileShape, typename ClusterShape, bool PONG, bool FAST_ACCUM>
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-                                    ArchTag, OperatorClass,
+                                    ArchTag,
+                                    OperatorClass,
                                     ElementA, LayoutA, AlignmentA,
                                     ElementB, LayoutB, AlignmentB,
                                     ElementAccumulator,
-                                    TileShape, ClusterShape,
+                                    TileShape,
+                                    ClusterShape,
                                     cutlass::gemm::collective::StageCountAutoCarveout<
-                                      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))
-                                    >,
-                                    //KernelSchedule
-                                    cutlass::gemm::collective::KernelScheduleAuto
-                                  >::CollectiveOp;
+                                            static_cast<int>(
+                                              sizeof(typename CollectiveEpilogue<TileShape, ClusterShape>::SharedStorage))>,
+                                    MainLoopSchedule<PONG, FAST_ACCUM>>::CollectiveOp;
 
+template <typename TileShape, typename ClusterShape, bool PONG, bool FAST_ACCUM>
 using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-                                    Shape<int,int,int,int>, // Indicates ProblemShape
-                                    CollectiveMainloop,
-                                    CollectiveEpilogue
+                                    Shape<int,int,int>, // Indicates ProblemShape
+                                    CollectiveMainloop<TileShape, ClusterShape, PONG, FAST_ACCUM>,
+                                    CollectiveEpilogue<TileShape, ClusterShape>
                                   >;
 
-using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-
-// Extract information from Gemm kernel.
-using EpilogueOutputOp  = typename Gemm::EpilogueOutputOp;
-using ElementScalar     = typename EpilogueOutputOp::ElementScalar;
-//using ElementAmax       = typename EpilogueOutputOp::ElementAmax;
-//using ActivationFunctor = typename EpilogueOutputOp::ActivationFn;
-
-using StrideA = typename Gemm::GemmKernel::StrideA;
-using StrideB = typename Gemm::GemmKernel::StrideB;
-using StrideC = typename Gemm::GemmKernel::StrideC;
-using StrideD = typename Gemm::GemmKernel::StrideD;
-using StrideAux = StrideD;
-
-constexpr bool IsDFp8 =
-    cute::is_same_v<ElementD, cutlass::float_e4m3_t> or
-    cute::is_same_v<ElementD, cutlass::float_e5m2_t>;
-
-constexpr bool IsAuxFp8 =
-    cute::is_same_v<ElementAux, cutlass::float_e4m3_t> or
-    cute::is_same_v<ElementAux, cutlass::float_e5m2_t>;
-
-StrideA stride_A;
-StrideB stride_B;
-StrideC stride_C;
-StrideD stride_D;
-StrideAux stride_aux;
-
-using LayoutScalar = cutlass::layout::PackedVectorLayout;
-cutlass::HostTensor<ElementScalar, LayoutScalar> scalar_alpha;
-cutlass::HostTensor<ElementScalar, LayoutScalar> scalar_beta;
-/* cutlass::HostTensor<ElementScalar, LayoutScalar> scale_A;
-cutlass::HostTensor<ElementScalar, LayoutScalar> scale_B;
-cutlass::HostTensor<ElementScalar, LayoutScalar> scale_C;
-cutlass::HostTensor<ElementScalar, LayoutScalar> scale_D;
-cutlass::HostTensor<ElementScalar, LayoutScalar> scale_aux;
-cutlass::HostTensor<ElementAmax  , LayoutScalar> abs_max_D;
-cutlass::HostTensor<ElementAmax  , LayoutScalar> reference_abs_max_D;
-cutlass::HostTensor<ElementAmax  , LayoutScalar> abs_max_aux;
-cutlass::HostTensor<ElementAmax  , LayoutScalar> reference_abs_max_aux; */
-
-using RasterOrderOptions = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerSm90Params::RasterOrderOptions;
+template <typename TileShape, typename ClusterShape, bool PONG, bool FAST_ACCUM>
+using Gemm_ = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel<TileShape, ClusterShape, PONG, FAST_ACCUM>>;
 
 // Command line options parsing
-template<typename RasterOrderOptions>
 struct Options {
 
   cutlass::gemm::GemmCoord problem_size;
 
   float alpha = 1.f, beta = 0.f;
-  float scale_a = 1.f, scale_b = 1.f, scale_c = 1.f, scale_d = 1.f, scale_aux = 1.f;
-  bool device_scale = false;
-  bool save_aux = false;
-  bool save_amax = false;
-  RasterOrderOptions raster = RasterOrderOptions::AlongN;
-  int swizzle = 1;
 
   Options(int M, int N, int K, float scale=1.f):
     beta(0.f)
@@ -218,10 +175,15 @@ struct Options {
 template <typename Gemm>
 struct TestbedRunner {
 
-  //using ElementCompute = typename Gemm::GemmKernel::Epilogue::OutputOp::ElementCompute;
-
   uint64_t seed;
 
+  using StrideA = typename Gemm::GemmKernel::StrideA;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
+
+  StrideA stride_A;
+  StrideB stride_B;
+  StrideC stride_C;
 
   //
   // Methods
@@ -231,63 +193,34 @@ struct TestbedRunner {
 
 
   bool run(
-    const Options<RasterOrderOptions>& options,
+    const Options& options,
     torch::Tensor out,  // FP32/FP16/BF16 (TODO)
     torch::Tensor x,    // float_e4m3_t
     torch::Tensor y     // float_e4m3_t
     )
   {
 
-    /* scalar_alpha.resize(cutlass::make_Coord(1));
-    scalar_beta.resize(cutlass::make_Coord(1));
-    cutlass::reference::host::TensorFill(scalar_alpha.host_view(), options.alpha);
-    cutlass::reference::host::TensorFill(scalar_beta.host_view(), options.beta);
-    scalar_alpha.sync_device();
-    scalar_beta.sync_device(); */
-
     stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(options.problem_size.m(), options.problem_size.k(), 1));
-    stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(options.problem_size.k(), options.problem_size.n(), 1));
+    stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(options.problem_size.n(), options.problem_size.k(), 1));
     stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(options.problem_size.m(), options.problem_size.n(), 1));
-    stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(options.problem_size.m(), options.problem_size.n(), 1));
-    stride_aux = stride_D;
 
     typename Gemm::Arguments arguments{
       cutlass::gemm::GemmUniversalMode::kGemm,
-      {options.problem_size.m(), options.problem_size.n(), options.problem_size.k(), 1},
-      {static_cast<ElementA*>(x.data_ptr()), stride_A,
-       static_cast<ElementB*>(y.data_ptr()), stride_B},
+      {options.problem_size.m(), options.problem_size.n(), options.problem_size.k()},
+      {reinterpret_cast<ElementA*>(x.data_ptr()), stride_A,
+       reinterpret_cast<ElementB*>(y.data_ptr()), stride_B},
       {
         {}, // epilogue.thread
-        static_cast<ElementC*>(out.data_ptr()), stride_C,
-        static_cast<ElementD*>(out.data_ptr()), stride_D
+        (ElementC*)out.data_ptr<at::BFloat16>(), stride_C,
+        (ElementC*)out.data_ptr<at::BFloat16>(), stride_C
       }
     };
 
-    auto &fusion_args = arguments.epilogue.thread;
-    fusion_args.alpha = options.alpha;
-    fusion_args.beta = options.beta;
-    fusion_args.alpha_ptr = scalar_alpha.device_data();
-    fusion_args.beta_ptr = scalar_beta.device_data();
-
-    /* fusion_args.scale_a = 1.f;
-    fusion_args.scale_b = 1.f;
-    fusion_args.scale_c = 1.f;
-    fusion_args.scale_a_ptr = scale_A.device_data();
-    fusion_args.scale_b_ptr = scale_B.device_data();
-    fusion_args.scale_c_ptr = scale_C.device_data(); */
-
-    // ignored if tensor types are not fp8
-    /* fusion_args.scale_d = 1.f;
-    fusion_args.scale_aux = 1.f;
-    fusion_args.scale_d_ptr   = scale_D.device_data();
-    fusion_args.scale_aux_ptr = scale_aux.device_data(); */
-
-    // leaving/setting these as nullptr disables the fusion at runtime
-    //fusion_args.bias_ptr = nullptr;
-
-    arguments.scheduler.raster_order = options.raster;
-    // The tile scheduler will swizzle up to 8 and with the nearest multiple of 2 (i.e., 1, 2, 4, and 8)
-    arguments.scheduler.max_swizzle_size = options.swizzle;
+    arguments.epilogue.thread = {
+      {float(options.alpha)}, // scale
+      {}, // Accumulator
+      {}, // Multiplies
+    };
 
     Gemm gemm_op;
 
@@ -334,8 +267,10 @@ bool fp8_matmul_host(
   auto N = y.size(0);
   auto K = x.size(1);
 
-  Options<RasterOrderOptions> options(M, N, K, alpha);
+  Options options(M, N, K, alpha);
 
-  TestbedRunner<Gemm> testbed_fast_accum;
+  using TileShape           = Shape<_128,_128,_128>;
+  using ClusterShape        = Shape<_2,_1,_1>;
+  TestbedRunner<Gemm_<TileShape, ClusterShape, false, true>> testbed_fast_accum;
   return testbed_fast_accum.run(options, out, x, y);
 }

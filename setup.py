@@ -71,11 +71,19 @@ if __name__ == '__main__':
                     "/mnt/nfs/clustersw/shared/cuda/12.4.1/include"
                 ],
                 extra_compile_args={
-                    'cxx': [],
-                    'nvcc': get_cuda_arch_flags(),
+                    'cxx': ['-O3', '-std=c++17'],
+                    'nvcc': get_cuda_arch_flags() + [
+                        '-O3',
+                        '-Xcompiler=-Wall',
+                        '-std=c++17',
+                        "-DNDEBUG"
+                    ],
                 },
                 libraries=["cuda", "cudart"],  # Ensure these are linked
-                library_dirs=["/mnt/nfs/clustersw/shared/cuda/12.4.1/lib64"],
+                library_dirs=[
+                    "/mnt/nfs/clustersw/shared/cuda/12.4.1/lib64",
+                    "/lib/x86_64-linux-gnu",
+                ],
                 extra_link_args=[
                 '-L/mnt/nfs/clustersw/shared/cuda/12.4.1/lib64',
                 '-lcudart',
