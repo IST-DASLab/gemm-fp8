@@ -69,19 +69,11 @@ using         LayoutC     = cutlass::layout::RowMajor;
 constexpr int AlignmentC  = 16 / sizeof(ElementC);
 
 // Core kernel configurations
-using ElementAccumulator  = float;                                          // Element type for internal accumulation
-using ElementCompute      = float;                                          // Element type for epilogue computation
+using ElementAccumulator  = float;
 using ElementComputeEpilogue = float;
-using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
-using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
+using ArchTag             = cutlass::arch::Sm90;
+using OperatorClass       = cutlass::arch::OpClassTensorOp;
 using EpilogueTileType    = cutlass::epilogue::collective::EpilogueTileAuto;
-
-using StageCountType =
-      cutlass::gemm::collective::StageCountAuto; // Stage count maximized
-                                                 // based on the tile size
-using KernelSchedule = cutlass::gemm::collective::
-      KernelScheduleAuto; // Kernel to launch based on the default setting in
-                          // the Collective Builder
 
 using DefaultSchedule = cutlass::gemm::KernelTmaWarpSpecialized;
 using PongSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
@@ -92,26 +84,26 @@ using FastPongSchedule =
 
 template <bool PONG>
 using SlowAccum = cute::conditional_t<PONG, PongSchedule, DefaultSchedule>;
+
 template <bool PONG>
 using FastAccum =
       cute::conditional_t<PONG, FastPongSchedule, FastDefaultSchedule>;
+
 template <bool PONG, bool FAST_ACCUM>
 using MainLoopSchedule =
       cute::conditional_t<FAST_ACCUM, FastAccum<PONG>, SlowAccum<PONG>>;
 
 using Scale_ =
       cutlass::epilogue::fusion::Sm90ScalarBroadcast<ElementComputeEpilogue>;
-
 using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-
 using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
     cutlass::multiplies,
     ElementC,
     ElementComputeEpilogue,
     cutlass::FloatRoundStyle::round_to_nearest>;
-
 using EpilogueEVT =
       cutlass::epilogue::fusion::Sm90EVT<Compute0, Scale_, Accum>;
+
 template <typename TileShape, typename ClusterShape>
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
                                     ArchTag,
@@ -120,7 +112,7 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
                                     ClusterShape,
                                     EpilogueTileType,
                                     ElementAccumulator,
-                                    ElementCompute,
+                                    ElementComputeEpilogue,
                                     ElementC, LayoutC, AlignmentC,
                                     ElementC, LayoutC, AlignmentC,
                                     cutlass::epilogue::TmaWarpSpecialized,
@@ -142,7 +134,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
 
 template <typename TileShape, typename ClusterShape, bool PONG, bool FAST_ACCUM>
 using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-                                    Shape<int,int,int>, // Indicates ProblemShape
+                                    Shape<int,int,int>,
                                     CollectiveMainloop<TileShape, ClusterShape, PONG, FAST_ACCUM>,
                                     CollectiveEpilogue<TileShape, ClusterShape>
                                   >;
@@ -269,8 +261,19 @@ bool fp8_matmul_host(
 
   Options options(M, N, K, alpha);
 
+  /* if(M==512){
+    using TileShape           = Shape<_128,_128,_128>;
+    using ClusterShape        = Shape<_1,_2,_1>;
+    TestbedRunner<Gemm_<TileShape, ClusterShape, false, true>> testbed_fast_accum;
+    return testbed_fast_accum.run(options, out, x, y);
+  } else {
+    using TileShape           = Shape<_128,_128,_128>;
+    using ClusterShape        = Shape<_2,_1,_1>;
+    TestbedRunner<Gemm_<TileShape, ClusterShape, true, true>> testbed_fast_accum;
+    return testbed_fast_accum.run(options, out, x, y);
+  } */
   using TileShape           = Shape<_128,_128,_128>;
   using ClusterShape        = Shape<_2,_1,_1>;
-  TestbedRunner<Gemm_<TileShape, ClusterShape, false, true>> testbed_fast_accum;
+  TestbedRunner<Gemm_<TileShape, ClusterShape, true, true>> testbed_fast_accum;
   return testbed_fast_accum.run(options, out, x, y);
 }
