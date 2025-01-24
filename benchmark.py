@@ -9,7 +9,7 @@ from typing import Callable, Iterable, List, Tuple
 sns.set()
 
 iters = 100
-warmup = 10
+warmup = 5
 
 
 def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
@@ -59,7 +59,7 @@ def bench_fn(fn: Callable, *args, **kwargs) -> Tuple:
 K_lists = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 11008]
 last_dim = 4096
 
-token_dim = [512, 1024, 2048]
+token_dim = [512, 1024, 2048, 4096, 8192, 16384]
 dim_lists = [ #from LLaMa3-8B
              [4096,  4096],
              [4096,  14336],

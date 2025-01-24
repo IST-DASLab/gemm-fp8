@@ -261,19 +261,20 @@ bool fp8_matmul_host(
 
   Options options(M, N, K, alpha);
 
-  /* if(M==512){
-    using TileShape           = Shape<_128,_128,_128>;
-    using ClusterShape        = Shape<_1,_2,_1>;
-    TestbedRunner<Gemm_<TileShape, ClusterShape, false, true>> testbed_fast_accum;
-    return testbed_fast_accum.run(options, out, x, y);
-  } else {
+  if (M<8192) {
     using TileShape           = Shape<_128,_128,_128>;
     using ClusterShape        = Shape<_2,_1,_1>;
     TestbedRunner<Gemm_<TileShape, ClusterShape, true, true>> testbed_fast_accum;
     return testbed_fast_accum.run(options, out, x, y);
-  } */
-  using TileShape           = Shape<_128,_128,_128>;
-  using ClusterShape        = Shape<_2,_1,_1>;
-  TestbedRunner<Gemm_<TileShape, ClusterShape, true, true>> testbed_fast_accum;
-  return testbed_fast_accum.run(options, out, x, y);
+  } else if (M==8192 && N<=4096){
+    using TileShape           = Shape<_128,_128,_128>;
+    using ClusterShape        = Shape<_4,_1,_1>;
+    TestbedRunner<Gemm_<TileShape, ClusterShape, true, true>> testbed_fast_accum;
+    return testbed_fast_accum.run(options, out, x, y);
+  } else {
+    using TileShape           = Shape<_128,_128,_128>;
+    using ClusterShape        = Shape<_4,_4,_1>;
+    TestbedRunner<Gemm_<TileShape, ClusterShape, true, true>> testbed_fast_accum;
+    return testbed_fast_accum.run(options, out, x, y);
+  }
 }

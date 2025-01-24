@@ -6,3 +6,4 @@ CMakeFiles/*
 gemm_fp8.egg-info/
 __pycache__/
 *.pyc
+.venv/*
